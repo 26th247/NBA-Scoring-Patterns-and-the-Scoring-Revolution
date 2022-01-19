@@ -1,0 +1,453 @@
+---
+title: "NBA Scoring Patterns and the Scoring Revolution"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(plotly)
+library(lubridate)
+library(extrafont)
+library(hexbin)
+library(tidyverse)
+
+
+setwd("C:/Users/Harun/Documents/nbaset")
+nba <- read.csv("C:/Users/Harun/Documents/nbaset/Seasons_Stats.csv")
+nba <- nba[is.na(nba$Year) == FALSE,]
+shot_logs <- read.csv("C:/Users/Harun/Documents/nbaset/shot_logs.csv")
+## load game logs of recent NBA years 2017- 2021 ##
+
+nbagames2017 <- read.csv("https://raw.githubusercontent.com/MattC137/Open_Data/master/Data/Sports/NBA/NBA_2017_Games.csv")
+nbagames2018 <- read.csv("https://raw.githubusercontent.com/MattC137/Open_Data/master/Data/Sports/NBA/NBA_2018_Games.csv")
+nbagames2019 <- read.csv("https://raw.githubusercontent.com/MattC137/Open_Data/master/Data/Sports/NBA/NBA_2019_Games.csv")
+nbagames2020 <- read.csv("https://raw.githubusercontent.com/MattC137/Open_Data/master/Data/Sports/NBA/NBA_2020_Games.csv")
+nbagames2021 <- read.csv("https://raw.githubusercontent.com/MattC137/Open_Data/master/Data/Sports/NBA/NBA_2021_Games.csv")
+
+```
+
+## Introduction
+
+No other league around the world has embraced data analytics quite like the NBA league. Analytics have highlighted the recent transformation within the game: the 3-point revolution. The adoption of the 3-point line and the subsequent 3-point shot in 1979 was perceived as a gimmick at first. With teams attempting only around 2.8 threes per game in the foremost season and deploying it as an auxiliary tactic, game play was scarcely affected. 
+Big data and the adoption of league-wide analytics began to change things and over the past several years, various teams have staked their entire future on analytics. Understanding that high-volume 3-point shooting could optimise scoring efficiency meant that it all came down to finding sufficiently gifted shooters and maintaing high-scoring games. Was it, however, boiled down to 3-point shooting alone?
+
+This report will focus on investigating the scoring outbreak of late in the NBA and aim to figure out if it was. This report will examine how and why teams are scoring such incredible numbers on a nightly basis. Have defences failed to keep up with the tactical revolution in offences? Are players simply more skilled in this area nowadays? Or is it the revolution of the 3-point shot. Understanding this will give us deeper insight into the scoring boom.
+
+
+## The Data
+
+The data set has been scraped from the official Basketball Reference website and contains various offensive and defensive metrics for every player in the NBA since the 1950 season up to the 2017 season. Among others, the metrics include statistics such as points scored, assists, rebounds, turnovers and games played, some being available starting with certain seasons when measurement has been instated. It has `r dim(nba)[1]` entries, with some players having more than one entry if they played for multiple teams during a season. Further game data from the 2018, 2019, 2020 and 2021 has been added to add further analyses.
+
+```{r, echo = FALSE}
+(colnames(nba))[-1]
+```
+
+\newpage
+
+## The Scoring Boom
+
+The starting point for looking at scoring trends is the change in scoring performance since the early days of the NBA in the 1950s.
+The graphic below observes the level of scoring at the threshold of players that have scored 20 points per game or more every season. What caused this spike in scoring efficiency?
+
+```{r, echo = FALSE, message=FALSE, warning = FALSE}
+count <- function(PPGs, threshold){
+  k <- 0
+  for (i in PPGs){
+  if (is.na(i) == FALSE) {
+    if (i > threshold) {
+      k <- k+1
+    }
+  }
+  }
+  return (k)
+}
+
+with_ppg <- nba %>% mutate(PPG = round(PTS/G,0))
+
+counts <- c()
+for (i in 1950:2017) {
+  y <- with_ppg %>% filter(Year == i) %>%  ddply("Player", function(df) return(df[df$G==max(df$G),])) %>% select(PPG) # disconsider duplicates
+  y <- unname(unlist(y))
+  k <- count(y,20)
+  counts <- c(counts,k)
+}
+# added data from 2018, 2019, 2020 manually from Basketball Reference
+year_ppg <- data.frame(cbind('Year' = 1950:2017, 'Counts' = counts))
+year_ppg <- rbind(year_ppg, c(2018, 33), c(2019,33), c(2020, 39))
+
+
+brks <- seq(1950,2020, by=7)
+g2 <- ggplot(year_ppg, aes(x = Year, y)) + geom_point(aes(y=Counts)) +
+  scale_x_continuous(breaks=brks) + 
+  labs(x = 'Season', y = '#PPG 20 or above', title = 'Scoring by Season',subtitle = 'Count Players with 20 PPG Or More By Season') +
+  theme_minimal()
+
+g2
+
+ggplotly(g2)
+
+```
+
+*Insights*
+
+- As per the graph, we can see the 1970s is the first real spike in scoring as stars began to fill and dominate what was then called the ABA (American Basketball Association). The decade saw 20-30 players having 20ppg games in a season for most seasons which was a drastic change to the highest 16 players in 1967-8 season.
+
+- Such change was nothing compared to the recent outburst in the last half-decade with 38 different players having 20ppg nights just this season so far. Relative increase and fluctuation was observed until the outburst in 2015-16 season. Some low-scoring outlier seasons noted in 2013 and 1999 seasons. 
+
+\newpage
+
+## Good Offence or Bad Defence
+
+The total number of points scored during games has increased significantly since the earlier days of the NBA. Pace, along with 3-point shooting has increased and positionless basketball has made it harder for teams to adjust defenses. Various developments in the last decade beg the question: have offenses outgrown defenses? 
+
+Initial instinct in recent seasons is to outscore the other team rather than slow them down. The best offenses in today's game will score well over 100 points per 100 possessions, but if you concede more than 100 points per 100 then your defensive rating is amongst the worst.
+
+*Ratings can be expressed as:*
+
+- Offensive: Points Scored / possessions * 100
+- Deffensive: Points Conceded / possessions * 100
+- So, how have the average defensive and offensive ratings of players changed over the years?
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+
+## merge the game logs by year into one big dataset
+
+Combined_nba_games <- rbind(nbagames2017, nbagames2018, nbagames2019, nbagames2020, nbagames2021)
+
+  Combined_nba_games %>%
+  group_by(Date, Points_For, Points_Against) %>%
+  filter(Result == "W") %>%  # eliminate showing of 'W' and 'L' of the same game
+  filter(Points_For > 0) %>% # eliminate games with null values as 2021 data set had TBD games
+  filter(Points_Against > 0) %>%
+    mutate(TotalPoints = Points_For*1000) %>%
+
+    ggplot(aes(x = as.Date(Date), type=1, y=TotalPoints)) +
+    geom_smooth(aes(y= Points_For, linetype = "For"), color = "RED3", fullrange = TRUE, method = "gam", se = FALSE) +
+    geom_smooth(aes(y= Points_Against, linetype = "Allowed"), color = "royalblue4", method = "gam", fullrange = TRUE, se = FALSE) +
+                labs(x = "Years",
+                     y = "Total PPG (Points Per Game)",
+                     title = "Offensive v Defensive Rating",
+                     subtitle = "PPG For/Against",
+                     linetype = "Points Per Game") +
+    theme_minimal()
+  
+```
+
+*Insights*
+
+- As can be observed the disparity between points allowed per game and points scored has always been large over the last 5 years and although defenses have followed a similar fluctuation, they have simply not been able to keep up with NBA offenses and the level of scoring.
+
+- The best defense in 2019-20 managed to only hold opponents to 106ppg, whereas 2016-17 saw the best defense hold opponents to 97.5ppg. 
+- A stark increase in points allowed certainly suggests defenses have worsened but have offenses outgrown them? 
+- In 2015-16 the difference between the best defense and the best offense was around (10ppg) and in this 2020-21 season it has ballooned to around a (17ppg) difference with the best offense averaging (120ppg) scored and the best defense averaging (103ppg) allowed. This, along with the indication of the smooth regression, we can infer that there is a growing disparity between defense and offense.
+
+
+## The 3-point revolution
+
+The introduction of the 3-point line was always going to eventually lead to increased efficiency and higher-volume shooting from that range. If we simply observe how the usage of the 3-point shot has changed since its debut, we will be able to draw some interesting conclusions. 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+x3p_year <- nba %>% group_by(Year) %>% summarise(avg_made = mean(X3P, na.rm = TRUE), avg_attempted = mean(X3PA, na.rm= TRUE))
+x3p_year <- x3p_year[-c(1:30, length(x3p_year$Year)),]
+brks = seq(1980,2017, by=5)
+
+#s2020 = 77 attempted 28 scored
+#s2019 = 121 attempted 43 scored
+#s2018 = 133 attempted 47 scored
+
+x3p_year <- rbind(x3p_year, c(2018, 47, 133), c(2019, 43, 121))
+
+g1 <- ggplot(x3p_year, aes(Year, y)) +
+  geom_line(aes(y=avg_made, color = 'Scored'), size = 1.2) +
+  geom_line(aes(y=avg_attempted, color = 'Attempted'), size = 1.2) +
+  theme_minimal()
+
+g1 <- g1 + scale_x_continuous(breaks = brks)
+g1 <- g1 + labs(x='Season', y='Shots', title = 'Three Pointers', subtitle = 'Attempted and scored 3pt shots from 1980 to 2019') +
+  scale_color_discrete(name = '')
+
+g1
+
+ggplotly(g1)
+```
+
+*Insights* 
+
+- The importance of the 3-point shot has continued to grow, and in 2018-19 season, teams made (22.5 per game) and took (63.4) more threes than they did the previous season (21 makes and 58 attempts per game). As teams continue to spread the floor, create mismatches and look for open shooters at the three-point line, this trend is not declining any time soon.
+
+- Aside from 3-point shots, teams are taking and making more shots in general. The percentage is not actually up, but the increase in both makes and attempts had led to more points.
+
+- Aside from a drastic dip in overall scoring around 2011 due to the NBA lockout, dependency in the 3 ball has seen a sharp increase, with the steepest change coming in 2015-16. What had happened in this period that led to an almost 5-fold increase in 3-point attempts. The career of one player in particular, for the most part.
+
+\newpage
+
+
+## Stephen Curry and the Golden State Warriors
+
+
+One player in particular proved hugely influential for the game of basketball in recent years. Stephen Curry and his indisputable proficiency with the 3-point shot acted as catalyst for the trend emphasizing three-pointers. Comparing his three-points attempts to the baseline of shooters with more than 70 attempts from 2010 (his debut) to 2016, it can be seen that the player heavily relies on shots from a range, especially compared to other skilled shooters.
+
+``` {r, echo = FALSE, message = FALSE, warning = FALSE}
+
+curr <- nba %>%  filter(Player == 'Stephen Curry') %>%
+  group_by(Year) %>% summarise (p3 = sum(X3PA, na.rm = TRUE))
+
+#avg <- nba %>% filter (Year <= 2010 & Year > 2000 & Player != 'Stephen Curry') %>% group_by(Year) %>% summarise (p3a = sum(X3PA, na.rm = TRUE))
+
+k <- nba %>% filter(Year > 2010 & X3PA > 70 & Player != 'Stephen Curry') %>% summarise (a = mean(X3PA, na.rm = TRUE))
+
+g5 <- ggplot(curr, aes(x = Year, y = p3)) + geom_line(color='Red', size = 1.2) + geom_hline(yintercept = 210, color = 'NavyBlue', size = 1.2) + theme_minimal() +
+  labs(title = 'Three-Point Attempts', subtitle = 'Stephen Curry 3P attempts compared to average 3P attempts by Shooters with at least 70 Attempts', x = 'Season', y = '3P Attempts')
+
+ggplotly(g5)
+  
+```
+
+*Insights* 
+
+- Steph Curry set records most years from 2015-16 onwards when he shot over 600 attempts in the season and averaged 11 attempts a game, all while shooting over 45%. Staggering numbers. Numbers that only inflated as the seasons went on and saw 750 attempts in 2016-17. In comparison, the second highest average attempts a game is 6.6.
+
+
+Efficiency
+
+
+Steph Curry's impact on the 3-point shot is simply stunning, yet what is overstated is his impact on efficiency and scoring as a whole. 2015-16 saw him set the record for a player efficiency rating (PER) OF 31.5, comparable to only Micheal Jordan's 90-91 season (29.4). This level of efficiency boiled down to him taking only layups and 3-point shots, simply the most efficient way to score points...the easiest 2 points and the highest value 3 points.
+
+  
+``` {r, echo = FALSE, message = FALSE, warning = FALSE}
+
+## Clean up data 
+
+shot_logs <- na.omit(shot_logs[,c("team","player","result","converted_x","converted_y")])
+
+# Converted_x and converted_y are full court coordinates. We need to convert them to half court only.
+shot_logs$converted_x <-ifelse(shot_logs$converted_y > 47,50 - shot_logs$converted_x,shot_logs$converted_x)
+shot_logs$converted_y <-ifelse(shot_logs$converted_y > 47,94 - shot_logs$converted_y,shot_logs$converted_y)
+
+# Function created to draw circle
+
+circle_fun <- function(center=c(0,0), diameter=1, npoints=500, start=0, end=2){
+  tt <- seq(start*pi, end*pi, length.out=npoints)
+  data.frame(
+    x = center[1] + diameter / 2 * cos(tt),
+    y = center[2] + diameter / 2 * sin(tt)
+  )
+}
+
+# Recreate symmetry
+rev_y <- function(y) 94-y
+
+# Create data frame containing coordinates of polygons
+new_coords <- function(x, y, group, descri){
+  new_coords_df <- data.frame(x = x, y = y)
+  new_coords_df$group <- group
+  new_coords_df$side <- 1
+  group <- group + 1
+  # The same thing for the opposite side
+  new_coords_df2 <- data.frame(x = x, y = rev_y(y))
+  new_coords_df2$group <- group
+  new_coords_df2$side <- 2
+  group <<- group + 1
+  # Collect the data
+  new_coords_df <- rbind(new_coords_df, new_coords_df2)
+  new_coords_df$descri <- descri
+  return(new_coords_df)
+}
+
+
+#Circles we need
+# Restricted area
+cercle_np_out <- circle_fun(center = c(25,5+3/12), diameter = (4+1/6)*2)
+cercle_np_in <- circle_fun(center = c(25,5+3/12), diameter = 4*2)
+# Three point
+cercle_3pts_out <- circle_fun(center = c(25,5+3/12), diameter = (23+9/12)*2)
+cercle_3pts_in <- circle_fun(center = c(25,5+3/12), diameter = (23+7/12)*2)
+# Paint
+cercle_ce <- circle_fun(center = c(25,5+3/12), diameter = 1.5)
+# Free Throws
+cercle_lf_out <- circle_fun(center = c(25,19), diameter = 6*2)
+cercle_lf_in <- circle_fun(center = c(25,19), diameter = (6-1/6)*2)
+# Center Circle
+cercle_mil_out <- circle_fun(center = c(25,47), diameter = 6*2)
+cercle_mil_in <- circle_fun(center = c(25,47), diameter = (6-1/6)*2)
+# Small Center Circle
+cercle_mil_petit_out <- circle_fun(center = c(25,47), diameter = 2*2)
+cercle_mil_petit_in <- circle_fun(center = c(25,47), diameter = (2-1/6)*2)
+
+# We need to assign the first value of the variable group. Then, each use of new_coords increments group value by one.
+
+group <- 1
+court <- new_coords(c(0-1/6,0-1/6,50 + 1/6,50 + 1/6), c(0 - 1/6,0,0,0 - 1/6), group = group, descri = "ligne de fond")
+court <- rbind(court, new_coords(x = c(0-1/6,0-1/6,0,0), y = c(0,47-1/12,47-1/12,0), group = group, descri = "ligne gauche"))
+court <- rbind(court, new_coords(x = c(50,50,50+1/6,50+1/6), y = c(0,47-1/12,47-1/12,0), group = group, descri = "ligne droite"))
+court <- rbind(court, new_coords(x = c(0,0,3,3), y = c(28,28+1/6,28+1/6,28), group = group, descri = "marque entraineur gauche"))
+court <- rbind(court, new_coords(x = c(47,47,50,50), y = c(28,28+1/6,28+1/6,28), group = group, descri = "marque entraineur droite"))
+court <- rbind(court, new_coords(x = c(3,3,3+1/6,3+1/6), y = c(0,14,14,0), group = group, descri = "3pts bas gauche"))
+court <- rbind(court, new_coords(x = c(47-1/6,47-1/6,47,47), y = c(0,14,14,0), group = group, descri = "3pts bas droit"))
+court <- rbind(court, new_coords(x = c(17,17,17+1/6,17+1/6), y = c(0,19,19,0), group = group, descri = "LF bas gauche"))
+court <- rbind(court, new_coords(x = c(33-1/6,33-1/6,33,33), y = c(0,19,19,0), group = group, descri = "LF bas droit"))
+court <- rbind(court, new_coords(x = c(17,17,33,33), y = c(19-1/6,19,19,19-1/6), group = group, descri = "LF tireur"))
+court <- rbind(court, new_coords(x = c(14-1/6,14-1/6,14,14), y = c(0,1/2,1/2,0), group = group, descri = "marque fond gauche"))
+court <- rbind(court, new_coords(x = c(36,36,36+1/6,36+1/6), y = c(0,1/2,1/2,0), group = group, descri = "marque fond droit"))
+court <- rbind(court, new_coords(x = c(19,19,19+1/6,19+1/6), y = c(0,19,19,0), group = group, descri = "LF gauche interieur"))
+court <- rbind(court, new_coords(x = c(31-1/6,31-1/6,31,31), y = c(0,19,19,0), group = group, descri = "LF droite interieur"))
+court <- rbind(court, new_coords(x = c(22, 22, 28, 28), y = c(4-1/6,4,4,4-1/6), group = group, descri = "planche"))
+court <- rbind(court, new_coords(x = c(cercle_3pts_out[31:220,"x"], rev(cercle_3pts_in[31:220,"x"])),
+                                 y = c(cercle_3pts_out[31:220,"y"], rev(cercle_3pts_in[31:220,"y"])), group = group, descri = "cercle 3pts"))
+court <- rbind(court, new_coords(x = c(cercle_np_out[1:250,"x"], rev(cercle_np_in[1:250,"x"])),
+                                 y = c(cercle_np_out[1:250,"y"], rev(cercle_np_in[1:250,"y"])), group = group, descri = "cercle non passage en force"))
+court <- rbind(court, new_coords(x = c(20+1/6,20+1/6,20+8/12,20+8/12), y = c(13,13+1/6,13+1/6,13), group = group, descri = "marque bas gauche cercle LF"))
+court <- rbind(court, new_coords(x = c(30-8/12,30-8/12,30-1/6,30-1/6), y = c(13,13+1/6,13+1/6,13), group = group, descri = "marque bas droite cercle LF"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[1:250,"x"], rev(cercle_lf_in[1:250,"x"])),
+                                 y = c(cercle_lf_out[1:250,"y"], rev(cercle_lf_in[1:250,"y"])), group = group, descri = "cercle LF haut"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[250:269,"x"], rev(cercle_lf_in[250:269,"x"])),
+                                 y = c(cercle_lf_out[250:269,"y"], rev(cercle_lf_in[250:269,"y"])), group = group, descri = "cercle LF partie 1"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[288:308,"x"], rev(cercle_lf_in[288:308,"x"])),
+                                 y = c(cercle_lf_out[288:308,"y"], rev(cercle_lf_in[288:308,"y"])), group = group, descri = "cercle LF partie 2"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[327:346,"x"], rev(cercle_lf_in[327:346,"x"])),
+                                 y = c(cercle_lf_out[327:346,"y"], rev(cercle_lf_in[327:346,"y"])), group = group, descri = "cercle LF partie 3"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[365:385,"x"], rev(cercle_lf_in[365:385,"x"])),
+                                 y = c(cercle_lf_out[365:385,"y"], rev(cercle_lf_in[365:385,"y"])), group = group, descri = "cercle LF partie 4"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[404:423,"x"], rev(cercle_lf_in[404:423,"x"])),
+                                 y = c(cercle_lf_out[404:423,"y"], rev(cercle_lf_in[404:423,"y"])), group = group, descri = "cercle LF partie 5"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[442:462,"x"], rev(cercle_lf_in[442:462,"x"])),
+                                 y = c(cercle_lf_out[442:462,"y"], rev(cercle_lf_in[442:462,"y"])), group = group, descri = "cercle LF partie 6"))
+court <- rbind(court, new_coords(x = c(cercle_lf_out[481:500,"x"], rev(cercle_lf_in[481:500,"x"])),
+                                 y = c(cercle_lf_out[481:500,"y"], rev(cercle_lf_in[481:500,"y"])), group = group, descri = "cercle LF partie 7"))
+court <- rbind(court, new_coords(x = c(17-0.5,17-0.5,17,17), y = c(7,7+1/6,7+1/6,7), group = group, descri = "marque 1 LF gauche"))
+court <- rbind(court, new_coords(x = c(17-0.5,17-0.5,17,17), y = c(8+1/6,8+1/3,8+1/3,8+1/6), group = group, descri = "marque 2 LF gauche"))
+court <- rbind(court, new_coords(x = c(17-0.5,17-0.5,17,17), y = c(11+1/3,11.5,11.5,11+1/3), group = group, descri = "marque 3 LF gauche"))
+court <- rbind(court, new_coords(x = c(17-0.5,17-0.5,17,17), y = c(14.5,14.5+1/6,14.5+1/6,14.5), group = group, descri = "marque 4 LF gauche"))
+court <- rbind(court, new_coords(x = c(33,33,33+0.5,33+0.5), y = c(7,7+1/6,7+1/6,7), group = group, descri = "marque 1 LF droite"))
+court <- rbind(court, new_coords(x = c(33,33,33+0.5,33+0.5), y = c(8+1/6,8+1/3,8+1/3,8+1/6), group = group, descri = "marque 2 LF droite"))
+court <- rbind(court, new_coords(x = c(33,33,33+0.5,33+0.5), y = c(11+1/3,11.5,11.5,11+1/3), group = group, descri = "marque 3 LF droite"))
+court <- rbind(court, new_coords(x = c(33,33,33+0.5,33+0.5), y = c(14.5,14.5+1/6,14.5+1/6,14.5), group = group, descri = "marque 4 LF droite"))
+court <- rbind(court, new_coords(x = c(0-1/6,0-1/6,50+1/6,50+1/6), y = c(94/2-1/12,94/2, 94/2, 94/2-1/12), group = group, descri = "ligne mediane"))
+court <- rbind(court, new_coords(x = c(cercle_mil_out[250:500,"x"], rev(cercle_mil_in[250:500,"x"])),
+                                 y = c(cercle_mil_out[250:500,"y"], rev(cercle_mil_in[250:500,"y"])), group = group, descri = "cercle milieu grand"))
+court <- rbind(court, new_coords(x = c(cercle_mil_petit_out[250:500,"x"], rev(cercle_mil_petit_in[250:500,"x"])),
+                                 y = c(cercle_mil_petit_out[250:500,"y"], rev(cercle_mil_petit_in[250:500,"y"])), group = group, descri = "cercle milieu petit"))
+court <- rbind(court, new_coords(x = cercle_ce[,"x"], y = cercle_ce[,"y"], group = group, descri = "anneau")) 
+
+## now to visualise the graph 
+
+P <- ggplot() + geom_polygon(data = court, aes(x = x, y = y, group = group), col = "gray") +
+  coord_equal() +
+  ylim(-2,96) +
+  xlim(-5,55) +
+  scale_x_continuous(breaks = c(0, 12.5, 25, 37.5, 50)) +
+  scale_y_continuous(breaks = c(0, 23.5, 47, 70.5, 94)) +
+  xlab("") + ylab("") +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(), axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(), axis.title = element_blank()
+  )
+
+P
+
+halfP <- P + coord_cartesian(ylim = c(-2, 44.7))
+halfP
+
+
+# generate a team's shooting on the court
+
+generate_team_chart <- function(team_name) { 
+  plot<- halfP + geom_hex(data = subset(shot_logs, team == team_name), 
+                          aes(x =converted_x , 
+                              y =converted_y, 
+                              fill = cut(..count.., c(0,1,2, 5, 10, Inf))), 
+                          colour = "lightblue", 
+                          binwidth = 1, 
+                          alpha = 0.75) + 
+    scale_fill_manual(values = c("grey98", "slategray3", "yellow", "red" , "black"), 
+                      labels = c("1","2","2-5","5-10","11+"), name = "Count")+ 
+    ggtitle(paste(team_name,"Total Shots")) 
+  return(plot) 
+}
+
+# Generate GSW
+
+generate_team_chart("GSW")
+
+# Generate NYK comparison
+
+generate_team_chart("NYK")
+
+# Generate Steph Curry
+
+generate_player_chart <- function(name) { 
+  plot<- halfP + geom_hex(data = subset(shot_logs, player == name), 
+                          aes(x =converted_x , 
+                              y =converted_y, 
+                              fill = cut(..count.., c(0,1,2, 5, 10, Inf))), 
+                          colour = "lightblue", 
+                          binwidth = 1, 
+                          alpha = 0.75) + 
+    scale_fill_manual(values = c("grey98", "slategray3", "yellow", "red" , "black"), labels = c("1","2","2-5","5-10","11+"), name = "Count")+ 
+    ggtitle(paste(name,"Total Shots")) 
+  return(plot) 
+}
+
+generate_player_chart("Stephen Curry")
+
+```
+  
+*Further Insight*
+
+- Curry wasn't just an elite shooter from 3 this season. He somehow led the league in field goal percentage on layups this season at 68.7 percent (minimum 150 attempts).
+
+- Curry made 51.6 percent of shots between 28 feet and the half-court line (47 feet) in 2015-16. The rest of the NBA hit 20.8 percent. Curry made more deep 3s than 10 NBA teams combined. The shot chart is a testament to his efficiency across the board.
+
+
+## Golden State Warriors Shooting
+
+
+No team attempted 40% of its shots as threes until 2017 and sure enough it was GSW. It happened again in 2018 but with two teams and in 2020 9 teams cross this threshold. 
+
+Both the team and the player were reliant on each other and could not have existed without one another. In observing Golden State's shot chart we can see the direct correlation to Curry's shot chart.
+
+We can also observe the difference between the New York Knicks, an average shooting team and the GSW who were the best shooting team, to provide a comparison.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# generate a team's shooting on the court
+
+generate_team_chart <- function(team_name) { 
+  plot<- halfP + geom_hex(data = subset(shot_logs, team == team_name), 
+                          aes(x =converted_x , 
+                              y =converted_y, 
+                              fill = cut(..count.., c(0,1,2, 5, 10, Inf))), 
+                          colour = "lightblue", 
+                          binwidth = 1, 
+                          alpha = 0.75) + 
+    scale_fill_manual(values = c("grey98", "slategray3", "yellow", "red" , "black"), 
+                      labels = c("1","2","2-5","5-10","11+"), name = "Count")+ 
+    ggtitle(paste(team_name,"Total Shots")) 
+  return(plot) 
+}
+
+# Generate GSW
+
+generate_team_chart("GSW")
+
+
+# Generate NYK comparison
+
+generate_team_chart("NYK")
+
+
+
+```
+Conclusion:
+
+
+Game analytics have allowed a closer and more in-depth look at trends in sports and particularly in the NBA which relies so heavily on them. Since the dawn of the NBA, scoring has been steadily increasing, with the introduction of the three-point shot acting as a catalyst of the process. Offenses have not kept up with defenses, and, in very recent years, scoring has seen another major increase as a result of players such as Stephen Curry, who completely revolutionized the importance of the three-pointer to an extent that changed the league. In essence, it is fair to say that out of those that we mentioned, the 3-point shot seemingly has had the biggest impact on the scoring boom in the last decade.
+
